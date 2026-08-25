@@ -1,9 +1,12 @@
+<<<<<<< HEAD
 # Terraform
 .terraform/
 *.tfstate
 *.tfstate.*
 .terraform.lock.hcl
 
+=======
+>>>>>>> origin/dev
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
