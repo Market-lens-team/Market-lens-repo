@@ -19,6 +19,83 @@ resource "google_bigquery_dataset" "bronze" {
   location = var.region
 }
 
+# ============================================================
+# BRONZE TABLES
+# ============================================================
+# These tables store the structured data that will be loaded
+# into the Bronze layer after ingestion from GCS.
+# ============================================================
+
+
+# ============================================================
+# 2.1 BRONZE STOCK PRICES
+# ============================================================
+
+resource "google_bigquery_table" "bronze_stock_prices" {
+  project = var.project_id
+
+  # Use the Bronze dataset created above.
+  dataset_id = google_bigquery_dataset.bronze.dataset_id
+
+  # BigQuery table name.
+  table_id = "bronze_stock_prices"
+
+  # Allows Terraform to delete/recreate the table if required.
+  # We can change this to true later for stronger protection.
+  deletion_protection = false
+}
+
+
+# ============================================================
+# 2.2 BRONZE ETF PRICES
+# ============================================================
+
+resource "google_bigquery_table" "bronze_etf_prices" {
+  project = var.project_id
+
+  # Use the Bronze dataset.
+  dataset_id = google_bigquery_dataset.bronze.dataset_id
+
+  # BigQuery table name.
+  table_id = "bronze_etf_prices"
+
+  deletion_protection = false
+}
+
+
+# ============================================================
+# 2.3 BRONZE SYMBOL METADATA
+# ============================================================
+
+resource "google_bigquery_table" "bronze_symbol_metadata" {
+  project = var.project_id
+
+  # Use the Bronze dataset.
+  dataset_id = google_bigquery_dataset.bronze.dataset_id
+
+  # BigQuery table name.
+  table_id = "bronze_symbol_metadata"
+
+  deletion_protection = false
+}
+
+
+# ============================================================
+# 2.4 INGESTION AUDIT
+# ============================================================
+
+resource "google_bigquery_table" "ingestion_audit" {
+  project = var.project_id
+
+  # Store the audit table inside Bronze.
+  dataset_id = google_bigquery_dataset.bronze.dataset_id
+
+  # BigQuery table name.
+  table_id = "ingestion_audit"
+
+  deletion_protection = false
+}
+
 
 # ============================================================
 # 2. SILVER LAYER
@@ -90,3 +167,4 @@ resource "google_bigquery_dataset" "semantic" {
 
   location = var.region
 }
+
