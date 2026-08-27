@@ -1,0 +1,14 @@
+[
+  {"name": "nasdaq_traded", "type": "STRING", "mode": "NULLABLE"},
+  {"name": "symbol", "type": "STRING", "mode": "NULLABLE"},
+  {"name": "security_name", "type": "STRING", "mode": "NULLABLE"},
+  {"name": "listing_exchange", "type": "STRING", "mode": "NULLABLE"},
+  {"name": "market_category", "type": "STRING", "mode": "NULLABLE"},
+  {"name": "etf", "type": "STRING", "mode": "NULLABLE"},
+  {"name": "round_lot_size", "type": "FLOAT64", "mode": "NULLABLE"},
+  {"name": "test_issue", "type": "STRING", "mode": "NULLABLE"},
+  {"name": "financial_status", "type": "STRING", "mode": "NULLABLE"},
+  {"name": "cqs_symbol", "type": "STRING", "mode": "NULLABLE"},
+  {"name": "nasdaq_symbol", "type": "STRING", "mode": "NULLABLE"},
+  {"name": "nextshares", "type": "STRING", "mode": "NULLABLE"}
+]

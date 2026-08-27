@@ -1,0 +1,67 @@
+[
+  {
+    "name": "batch_id",
+    "type": "STRING",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "load_type",
+    "type": "STRING",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "asset_type",
+    "type": "STRING",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "gcs_path",
+    "type": "STRING",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "expected_file_count",
+    "type": "INTEGER",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "processed_file_count",
+    "type": "INTEGER",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "expected_row_count",
+    "type": "INTEGER",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "loaded_row_count",
+    "type": "INTEGER",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "failed_file_count",
+    "type": "INTEGER",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "status",
+    "type": "STRING",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "started_at",
+    "type": "TIMESTAMP",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "completed_at",
+    "type": "TIMESTAMP",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "error_message",
+    "type": "STRING",
+    "mode": "NULLABLE"
+  }
+]
