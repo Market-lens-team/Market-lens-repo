@@ -1,0 +1,18 @@
+[
+  { "name": "Date", "type": "DATE", "mode": "NULLABLE" },
+  { "name": "symbol", "type": "STRING", "mode": "NULLABLE" },
+  { "name": "asset_type", "type": "STRING", "mode": "NULLABLE" },
+  { "name": "Open", "type": "FLOAT", "mode": "NULLABLE" },
+  { "name": "High", "type": "FLOAT", "mode": "NULLABLE" },
+  { "name": "Low", "type": "FLOAT", "mode": "NULLABLE" },
+  { "name": "Close", "type": "FLOAT", "mode": "NULLABLE" },
+  { "name": "Adj_Close", "type": "FLOAT", "mode": "NULLABLE" },
+  { "name": "Volume", "type": "FLOAT", "mode": "NULLABLE" },
+  { "name": "is_valid", "type": "BOOLEAN", "mode": "NULLABLE" },
+  { "name": "daily_return_pct", "type": "FLOAT", "mode": "NULLABLE" },
+  { "name": "rolling_avg_volume_30d", "type": "FLOAT", "mode": "NULLABLE" },
+  { "name": "rolling_stddev_volume_30d", "type": "FLOAT", "mode": "NULLABLE" },
+  { "name": "rolling_max_close", "type": "FLOAT", "mode": "NULLABLE" },
+  { "name": "run_id", "type": "STRING", "mode": "NULLABLE" },
+  { "name": "silver_loaded_at", "type": "TIMESTAMP", "mode": "NULLABLE" }
+]

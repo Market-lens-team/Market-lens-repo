@@ -544,3 +544,29 @@ def write_audit(record: dict):
             "Audit row written: %s",
             record.get("batch_id")
         )
+def write_silver_ready_marker(run_id: str):
+    """
+    Writes an empty marker file to GCS once Bronze (stock + ETF) has
+    fully completed. This upload fires the GCS trigger on the
+    bronze-to-silver Cloud Function, which watches for files matching
+    silver_trigger/<run_id>/_ready and ignores everything else.
+
+    Call this only after confirming both stock and ETF batches
+    succeeded (i.e. right after your existing completion check).
+    """
+
+    bucket = storage_client.bucket(BUCKET_NAME)
+
+    marker_path = f"silver_trigger/{run_id}/_ready"
+
+    blob = bucket.blob(marker_path)
+
+    blob.upload_from_string(
+        "",
+        content_type="text/plain",
+    )
+
+    logging.info(
+        "Silver trigger marker written: %s",
+        marker_path,
+    )
