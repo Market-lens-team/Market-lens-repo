@@ -10,18 +10,20 @@ from config import (
     REGION,
     BRONZE_DATASET,
     SILVER_DATASET,
+    STOCK_TABLE,
+    ETF_TABLE,
+    METADATA_TABLE,
+    SILVER_TABLE,
+    SILVER_METADATA_TABLE,
+    AUDIT_TABLE,
+    QUARANTINE_DATASET,
 )
 
 logging.basicConfig(level=logging.INFO)
 
 bq_client = bigquery.Client(project=PROJECT_ID)
 
-STOCK_TABLE = "bronze_stock_prices"
-ETF_TABLE = "bronze_etf_prices"
-METADATA_TABLE = "bronze_symbol_metadata"
-SILVER_TABLE = "silver_market_data"
-SILVER_METADATA_TABLE = "silver_symbol_metadata"
-AUDIT_TABLE = "ingestion_audit"
+SILVER_QUARANTINE_TABLE = "silver_quarantine"
 
 SCHEMA_DIR = os.path.join(os.path.dirname(__file__), "schema")
 
@@ -61,6 +63,15 @@ def ensure_silver_tables_exist():
         schema=metadata_schema,
     )
     table_retry(bq_client.create_table)(metadata_table, exists_ok=True)
+
+    quarantine_schema = bq_client.schema_from_json(
+        os.path.join(SCHEMA_DIR, "silver_quarantine_schema.json")
+    )
+    quarantine_table = bigquery.Table(
+        f"{PROJECT_ID}.{QUARANTINE_DATASET}.{SILVER_QUARANTINE_TABLE}",
+        schema=quarantine_schema,
+    )
+    table_retry(bq_client.create_table)(quarantine_table, exists_ok=True)
 
     logging.info("Silver dataset and tables confirmed/created")
 
@@ -129,7 +140,8 @@ def build_silver_query(run_id: str) -> str:
                 (Open IS NOT NULL
                  AND High IS NOT NULL
                  AND Low IS NOT NULL
-                 AND Close IS NOT NULL) AS is_valid
+                 AND Close IS NOT NULL
+                 AND Adj_Close IS NOT NULL) AS is_valid
             FROM cleaned
         ),
 
@@ -182,6 +194,13 @@ def build_silver_query(run_id: str) -> str:
             w.rolling_max_close
 
         FROM with_metrics w
+        WHERE w.is_valid = TRUE
+        -- Invalid rows are excluded here; they are captured separately
+        -- in silver_quarantine via write_quarantine_rows(), with their
+        -- original values and a reason. Rolling metrics above are still
+        -- computed over the full (unfiltered) history per symbol, so a
+        -- day's return/rolling stats naturally reflect a gap if the
+        -- prior day was invalid, rather than silently interpolating.
 
     ) S
     ON T.Date = S.Date AND T.symbol = S.symbol AND T.asset_type = S.asset_type
@@ -263,6 +282,102 @@ def refresh_silver_symbol_metadata() -> int:
     return rows
 
 
+def write_quarantine_rows(run_id: str) -> int:
+    """
+    Captures rows that failed validation, with their ORIGINAL
+    (uncleaned) values, into silver_quarantine for inspection.
+    Runs against the same Bronze sources as the main transform, so
+    the reason for rejection is visible (e.g. Open=0, Adj_Close
+    out of range, or NULL in the source) rather than the NULLed
+    version.
+
+    Uses MERGE (keyed on Date + symbol + asset_type), not INSERT, so
+    re-running Silver never re-inserts the same bad row twice - the
+    reason/run_id/quarantined_at just get refreshed on match.
+
+    The invalidity condition here mirrors is_valid in
+    build_silver_query() exactly (including IS NULL checks), so a
+    row is never silently excluded from silver_market_data without
+    also showing up here.
+    """
+
+    target = f"{PROJECT_ID}.{QUARANTINE_DATASET}.{SILVER_QUARANTINE_TABLE}"
+    stock_source = f"{PROJECT_ID}.{BRONZE_DATASET}.{STOCK_TABLE}"
+    etf_source = f"{PROJECT_ID}.{BRONZE_DATASET}.{ETF_TABLE}"
+
+    query = f"""
+    MERGE `{target}` T
+    USING (
+
+        WITH combined AS (
+            SELECT Date, symbol, 'stock' AS asset_type,
+                   Open, High, Low, Close, Adj_Close, Volume
+            FROM `{stock_source}`
+
+            UNION ALL
+
+            SELECT Date, symbol, 'etf' AS asset_type,
+                   Open, High, Low, Close, Adj_Close, Volume
+            FROM `{etf_source}`
+        )
+
+        SELECT
+            Date, symbol, asset_type, Open, High, Low, Close, Adj_Close, Volume,
+
+            ARRAY_TO_STRING([
+                IF(Open IS NULL, 'null_open', NULL),
+                IF(Open = 0, 'zero_open', NULL),
+                IF(High IS NULL, 'null_high', NULL),
+                IF(High = 0, 'zero_high', NULL),
+                IF(Low IS NULL, 'null_low', NULL),
+                IF(Low = 0, 'zero_low', NULL),
+                IF(Close IS NULL, 'null_close', NULL),
+                IF(Close = 0, 'zero_close', NULL),
+                IF(Adj_Close IS NULL, 'null_adj_close', NULL),
+                IF(High < Low, 'high_less_than_low', NULL),
+                IF(Adj_Close < 0 OR Adj_Close > 100000, 'adj_close_out_of_range', NULL)
+            ], ', ') AS reason
+
+        FROM combined
+        WHERE Open IS NULL OR Open = 0
+           OR High IS NULL OR High = 0
+           OR Low IS NULL OR Low = 0
+           OR Close IS NULL OR Close = 0
+           OR Adj_Close IS NULL
+           OR High < Low
+           OR Adj_Close < 0 OR Adj_Close > 100000
+
+    ) S
+    ON T.Date = S.Date AND T.symbol = S.symbol AND T.asset_type = S.asset_type
+
+    WHEN MATCHED THEN
+      UPDATE SET
+        Open = S.Open, High = S.High, Low = S.Low, Close = S.Close,
+        Adj_Close = S.Adj_Close, Volume = S.Volume,
+        reason = S.reason,
+        run_id = '{run_id}',
+        quarantined_at = CURRENT_TIMESTAMP()
+
+    WHEN NOT MATCHED THEN
+      INSERT (Date, symbol, asset_type, Open, High, Low, Close, Adj_Close,
+              Volume, reason, run_id, quarantined_at)
+      VALUES (S.Date, S.symbol, S.asset_type, S.Open, S.High, S.Low, S.Close,
+              S.Adj_Close, S.Volume, S.reason, '{run_id}', CURRENT_TIMESTAMP())
+    """
+
+    query_retry = retry.Retry(initial=2.0, maximum=30.0, multiplier=2.0, deadline=120)
+
+    logging.info("Writing quarantined rows for run_id=%s", run_id)
+
+    job = bq_client.query(query, location=REGION)
+    query_retry(job.result)()
+
+    rows = job.num_dml_affected_rows or 0
+    logging.info("Quarantine write complete, rows=%s", rows)
+
+    return rows
+
+
 def run_silver_transform(run_id: str) -> int:
     """
     Executes the Bronze -> Silver MERGE and returns rows affected.
@@ -307,9 +422,9 @@ def write_silver_audit(
     file counts) don't apply to Silver's transform, so they're left
     NULL. status is uppercase ('SUCCESS'/'FAILED') to match Bronze.
     """
- 
+
     table_id = f"{PROJECT_ID}.{BRONZE_DATASET}.{AUDIT_TABLE}"
- 
+
     record = {
         "batch_id": batch_id,
         "load_type": "SILVER",
@@ -324,12 +439,12 @@ def write_silver_audit(
         "completed_at": datetime.now(timezone.utc).isoformat(),
         "error_message": error_message[:5000] if error_message else None,
     }
- 
+
     insert_retry = retry.Retry(initial=2.0, maximum=30.0, multiplier=2.0, deadline=120)
     insert_rows = insert_retry(bq_client.insert_rows_json)
- 
+
     errors = insert_rows(table_id, [record])
- 
+
     if errors:
         logging.error("Silver audit insert failed: %s", errors)
     else:

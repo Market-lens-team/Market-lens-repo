@@ -67,3 +67,4 @@ SILVER_TRIGGER_SUFFIX = "_ready"
 # -------------------------
 
 QUARANTINE_PREFIX = "quarantine"
+QUARANTINE_DATASET = "quarantined"
