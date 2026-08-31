@@ -25,7 +25,7 @@ bq_client = bigquery.Client(project=PROJECT_ID)
 
 SILVER_QUARANTINE_TABLE = "silver_quarantine"
 
-SCHEMA_DIR = os.path.join(os.path.dirname(__file__), "schema")
+SCHEMA_DIR = os.path.join(os.path.dirname(__file__), "schemas")
 
 
 def ensure_silver_tables_exist():

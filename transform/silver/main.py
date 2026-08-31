@@ -5,7 +5,7 @@ import functions_framework
 
 from config import SILVER_TRIGGER_PREFIX, SILVER_TRIGGER_SUFFIX
 
-from silver_utils import (
+from utils import (
     run_silver_transform,
     refresh_silver_symbol_metadata,
     write_silver_audit,
