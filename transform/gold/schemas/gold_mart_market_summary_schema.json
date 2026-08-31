@@ -1,0 +1,10 @@
+[
+  { "name": "Date", "type": "DATE", "mode": "NULLABLE" },
+  { "name": "asset_type", "type": "STRING", "mode": "NULLABLE" },
+  { "name": "total_securities", "type": "INTEGER", "mode": "NULLABLE" },
+  { "name": "advancers", "type": "INTEGER", "mode": "NULLABLE" },
+  { "name": "decliners", "type": "INTEGER", "mode": "NULLABLE" },
+  { "name": "avg_return_pct", "type": "FLOAT", "mode": "NULLABLE" },
+  { "name": "avg_volume_spike_ratio", "type": "FLOAT", "mode": "NULLABLE" },
+  { "name": "gold_loaded_at", "type": "TIMESTAMP", "mode": "NULLABLE" }
+]
