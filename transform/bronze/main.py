@@ -63,6 +63,7 @@ from utils import (
     write_audit,
     file_exists,
     PRICE_FILE_SCHEMA,
+    write_silver_ready_marker,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -497,6 +498,10 @@ def gcs_to_bronze(cloud_event):
         )
 
         return
+    silver_run_id = (
+        f"{load_type.lower()}_"
+        f"{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
+)
 
     logging.info(
         "READY marker detected for load_type=%s "
@@ -540,3 +545,4 @@ def gcs_to_bronze(cloud_event):
         load_type
     )
 
+    write_silver_ready_marker(silver_run_id)
