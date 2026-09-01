@@ -1,239 +1,369 @@
 import logging
 from datetime import datetime, timezone
+from pathlib import Path
 
 import functions_framework
 
 from config import (
-    STOCK_BATCH_SIZE,
-    ETF_BATCH_SIZE,
+    BUCKET_NAME,
     STOCK_TABLE,
     ETF_TABLE,
 )
 
 from utils import (
-    list_csv_files,
     validate_price_file,
     quarantine_file,
     load_price_batch,
+    check_duplicate_file,
     write_audit,
 )
 
-logging.basicConfig(level=logging.INFO)
+
+logging.basicConfig(
+    level=logging.INFO
+)
 
 
 def utc_now():
-    return datetime.now(timezone.utc)
 
-
-def chunks(items, size):
-    for index in range(0, len(items), size):
-        yield items[index:index + size]
+    return datetime.now(
+        timezone.utc
+    )
 
 
 @functions_framework.cloud_event
-def gcs_to_bronze(cloud_event):
+def gcs_to_bronze(
+    cloud_event
+):
 
     event = cloud_event.data
 
     object_name = event["name"]
-    generation = str(event.get("generation", ""))
 
     logging.info(
-        "Received GCS event. Object=%s Generation=%s",
+        "Received GCS event: %s",
         object_name,
-        generation,
     )
 
-    if not object_name.endswith("/_READY"):
+    # ========================================================
+    # ONLY CSV
+    # ========================================================
+
+    if not object_name.lower().endswith(
+        ".csv"
+    ):
+
         logging.info(
-            "Ignoring normal file upload: %s",
+            "Ignoring non-CSV object: %s",
             object_name,
         )
+
         return
+
+    # ========================================================
+    # EXPECTED PATH
+    #
+    # historical/stocks/A.csv
+    # historical/etfs/SPY.csv
+    # incremental/stocks/AAPL.csv
+    # incremental/etfs/QQQ.csv
+    # ========================================================
 
     parts = object_name.split("/")
 
     if len(parts) != 3:
-        logging.error(
-            "Invalid READY path: %s",
+
+        logging.info(
+            "Ignoring unsupported path: %s",
             object_name,
         )
+
         return
 
     load_type = parts[0].upper()
+
     asset_folder = parts[1].lower()
+
+    file_name = parts[2]
+
+    # ========================================================
+    # LOAD TYPE
+    # ========================================================
 
     if load_type not in {
         "HISTORICAL",
         "INCREMENTAL",
     }:
-        logging.error(
-            "Invalid load type: %s",
+
+        logging.info(
+            "Ignoring unsupported load type: %s",
             load_type,
         )
+
         return
+
+    # ========================================================
+    # ASSET TYPE
+    # ========================================================
 
     if asset_folder not in {
         "stocks",
         "etfs",
     }:
-        logging.error(
-            "Invalid asset folder: %s",
+
+        logging.info(
+            "Ignoring unsupported asset folder: %s",
             asset_folder,
         )
+
         return
 
-    prefix = f"{parts[0]}/{parts[1]}/"
+    # ========================================================
+    # TARGET TABLE
+    # ========================================================
 
     if asset_folder == "stocks":
+
         target_table = STOCK_TABLE
+
         asset_type = "STOCK"
-        batch_size = STOCK_BATCH_SIZE
+
     else:
+
         target_table = ETF_TABLE
+
         asset_type = "ETF"
-        batch_size = ETF_BATCH_SIZE
 
-    started_at = utc_now()
+    # ========================================================
+    # GET BLOB
+    # ========================================================
 
-    batch_id = (
-        f"{load_type.lower()}_"
-        f"{asset_folder}_"
-        f"{generation}"
+    from google.cloud import storage
+
+    storage_client = storage.Client()
+
+    bucket = storage_client.bucket(
+        BUCKET_NAME
     )
 
-    blobs = list_csv_files(prefix)
+    blob = bucket.blob(
+        object_name
+    )
 
-    expected_files = len(blobs)
+    blob.reload()
 
-    if expected_files == 0:
-
-        write_audit({
-            "batch_id": batch_id,
-            "load_type": load_type,
-            "asset_type": asset_type,
-            "gcs_path": prefix,
-            "expected_file_count": 0,
-            "processed_file_count": 0,
-            "expected_row_count": None,
-            "loaded_row_count": 0,
-            "failed_file_count": 0,
-            "status": "FAILED",
-            "started_at": started_at.isoformat(),
-            "completed_at": utc_now().isoformat(),
-            "error_message": "No CSV files found",
-        })
-
-        return
-
-    valid_files = []
-    failed_files = 0
-
-    for blob in blobs:
-
-        valid, reason = validate_price_file(blob)
-
-        if not valid:
-
-            failed_files += 1
-
-            quarantine_file(
-                blob,
-                asset_folder,
-                reason,
-            )
-
-            continue
-
-        valid_files.append(blob)
-
-    processed_files = 0
-    loaded_rows = 0
+    # ========================================================
+    # DUPLICATE CHECK
+    # ========================================================
 
     try:
 
-        for batch_number, batch in enumerate(
-            chunks(valid_files, batch_size),
-            start=1,
-        ):
+        already_processed = (
+            check_duplicate_file(
+                object_name
+            )
+        )
+
+        if already_processed:
+
             logging.info(
-                "Processing batch %s with %s files",
-                batch_number,
-                len(batch),
+                "File already processed. "
+                "Skipping: %s",
+                object_name,
             )
 
-            uris = [
-                f"gs://{blob.bucket.name}/{blob.name}"
-                for blob in batch
-            ]
+            return
 
-            external_table_name = (
-                f"_ext_"
-                f"{asset_folder}_"
-                f"{generation}_"
-                f"{batch_number}"
-            )
+    except Exception as exc:
 
-            rows = load_price_batch(
-                uris=uris,
-                target_table=target_table,
-                external_table_name=external_table_name,
-            )
+        logging.exception(
+            "Duplicate check failed"
+        )
 
-            loaded_rows += rows
-            processed_files += len(batch)
+        raise
 
-        status = (
-            "SUCCESS"
-            if failed_files == 0
-            else "PARTIAL"
+    # ========================================================
+    # VALIDATE
+    # ========================================================
+
+    valid, reason = (
+        validate_price_file(blob)
+    )
+
+    if not valid:
+
+        quarantine_file(
+            blob,
+            asset_type,
+            reason,
         )
 
         write_audit({
-            "batch_id": batch_id,
-            "load_type": load_type,
-            "asset_type": asset_type,
-            "gcs_path": prefix,
-            "expected_file_count": expected_files,
-            "processed_file_count": processed_files,
-            "expected_row_count": None,
-            "loaded_row_count": loaded_rows,
-            "failed_file_count": failed_files,
-            "status": status,
-            "started_at": started_at.isoformat(),
-            "completed_at": utc_now().isoformat(),
-            "error_message": (
-                None
-                if failed_files == 0
-                else f"{failed_files} files quarantined"
+
+            "batch_id": (
+                f"{load_type.lower()}_"
+                f"{asset_folder}_"
+                f"{Path(file_name).stem}"
             ),
+
+            "load_type": load_type,
+
+            "asset_type": asset_type,
+
+            "gcs_path": object_name,
+
+            "expected_file_count": 1,
+
+            "processed_file_count": 0,
+
+            "expected_row_count": None,
+
+            "loaded_row_count": 0,
+
+            "failed_file_count": 1,
+
+            "status": "QUARANTINED",
+
+            "started_at": (
+                utc_now().isoformat()
+            ),
+
+            "completed_at": (
+                utc_now().isoformat()
+            ),
+
+            "error_message": reason,
+
         })
 
+        return
+
+    # ========================================================
+    # LOAD
+    # ========================================================
+
+    started_at = utc_now()
+
+    symbol = Path(
+        file_name
+    ).stem.upper()
+
+    external_table_name = (
+        f"_ext_"
+        f"{asset_folder}_"
+        f"{symbol}_"
+        f"{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}"
+    )
+
+    try:
+
+        rows = load_price_batch(
+
+            uris=[
+                f"gs://{BUCKET_NAME}/"
+                f"{object_name}"
+            ],
+
+            target_table=target_table,
+
+            external_table_name=(
+                external_table_name
+            ),
+        )
+
+        # ====================================================
+        # AUDIT SUCCESS
+        # ====================================================
+
+        write_audit({
+
+            "batch_id": (
+                f"{load_type.lower()}_"
+                f"{asset_folder}_"
+                f"{symbol}"
+            ),
+
+            "load_type": load_type,
+
+            "asset_type": asset_type,
+
+            "gcs_path": object_name,
+
+            "expected_file_count": 1,
+
+            "processed_file_count": 1,
+
+            "expected_row_count": None,
+
+            "loaded_row_count": rows,
+
+            "failed_file_count": 0,
+
+            "status": "SUCCESS",
+
+            "started_at": (
+                started_at.isoformat()
+            ),
+
+            "completed_at": (
+                utc_now().isoformat()
+            ),
+
+            "error_message": None,
+
+        })
+
+        logging.info(
+            "SUCCESS: %s | Rows=%s",
+            object_name,
+            rows,
+        )
+
     except Exception as exc:
-        logging.exception("Batch failed")
 
-        try:
-            write_audit({
-                "batch_id": batch_id,
-                "load_type": load_type,
-                "asset_type": asset_type,
-                "gcs_path": prefix,
-                "expected_file_count": expected_files,
-                "processed_file_count": processed_files,
-                "expected_row_count": None,
-                "loaded_row_count": loaded_rows,
-                "failed_file_count": failed_files,
-                "status": "FAILED",
-                "started_at": started_at.isoformat(),
-                "completed_at": utc_now().isoformat(),
-                "error_message": str(exc)[:5000],
-            })
+        logging.exception(
+            "File load failed: %s",
+            object_name,
+        )
 
-        except Exception as audit_exc:
+        write_audit({
 
-            logging.exception(
-                "Audit write failed: %s",
-                audit_exc,
-            )
+            "batch_id": (
+                f"{load_type.lower()}_"
+                f"{asset_folder}_"
+                f"{symbol}"
+            ),
+
+            "load_type": load_type,
+
+            "asset_type": asset_type,
+
+            "gcs_path": object_name,
+
+            "expected_file_count": 1,
+
+            "processed_file_count": 0,
+
+            "expected_row_count": None,
+
+            "loaded_row_count": 0,
+
+            "failed_file_count": 1,
+
+            "status": "FAILED",
+
+            "started_at": (
+                started_at.isoformat()
+            ),
+
+            "completed_at": (
+                utc_now().isoformat()
+            ),
+
+            "error_message": str(exc)[
+                :5000
+            ],
+
+        })
 
         raise
