@@ -11,6 +11,7 @@ from utils import (
     write_silver_audit,
     write_quarantine_rows,
     ensure_silver_tables_exist,
+    write_gold_ready_marker,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -78,6 +79,14 @@ def bronze_to_silver(cloud_event):
             started_at=quarantine_started_at,
             loaded_row_count=quarantine_rows,
         )
+
+        # --------------------------------------------------------
+        # THIS WAS MISSING: fire the Gold trigger now that every
+        # Silver step above has succeeded. Without this call, Gold
+        # never receives a marker and the pipeline silently stops
+        # here, even though Silver itself completes successfully.
+        # --------------------------------------------------------
+        write_gold_ready_marker(run_id)
 
     except Exception as exc:
         logging.exception("Silver transform failed for run_id=%s", run_id)

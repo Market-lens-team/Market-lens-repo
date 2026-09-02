@@ -449,3 +449,43 @@ def write_silver_audit(
         logging.error("Silver audit insert failed: %s", errors)
     else:
         logging.info("Silver audit record written: %s", batch_id)
+
+from google.cloud import storage
+
+GOLD_TRIGGER_BUCKET = "market-lens-506611-raw-mlteam-2026"
+GOLD_TRIGGER_PREFIX = "gold_trigger"
+
+storage_client = storage.Client()
+
+
+def write_gold_ready_marker(run_id: str):
+    """
+    Writes an empty marker file to GCS once Silver has fully
+    completed (market data MERGE + metadata refresh + quarantine
+    write all succeeded). This upload fires the GCS trigger on the
+    silver-to-gold Cloud Function, which watches for files matching
+    gold_trigger/<run_id>/_ready and ignores every other file event.
+
+    Path format matches Gold's main.py check (len(parts) == 3):
+        gold_trigger/<run_id>/_ready
+
+    Call this only after Silver's quarantine step succeeds - if
+    anything upstream raises, this line is never reached, so Gold
+    never fires on incomplete/bad Silver data.
+    """
+
+    bucket = storage_client.bucket(GOLD_TRIGGER_BUCKET)
+
+    marker_path = f"gold_trigger/{run_id}/_ready"
+
+    blob = bucket.blob(marker_path)
+
+    blob.upload_from_string(
+        "",
+        content_type="text/plain",
+    )
+
+    logging.info(
+        "Gold trigger marker written: %s",
+        marker_path,
+    )
