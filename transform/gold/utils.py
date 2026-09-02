@@ -1,3 +1,14 @@
+"""
+utils.py
+
+Helper functions used by main.py:
+    - run_gold_refresh : calls gold.sp_refresh_all(run_id) and
+                          returns the resulting mart_screener row
+                          count
+    - write_gold_audit  : logs this Cloud Function's own overall
+                          SUCCESS/FAILED row to ingestion_audit
+"""
+
 import logging
 from datetime import datetime, timezone
 
@@ -26,22 +37,25 @@ def run_gold_refresh(run_id: str) -> int:
     Executes the Gold stored procedure.
 
     IMPORTANT:
-    sp_refresh_all() takes ZERO arguments.
+    sp_refresh_all(p_run_id STRING) takes ONE argument.
 
-    run_id is used only for:
-        - logging
-        - audit tracking
+    run_id is passed through so every per-table/per-view audit row
+    written inside the procedure (batch_id = CONCAT(p_run_id, '_x'))
+    can be correlated back to this specific trigger. It is used only
+    for audit correlation, never in business logic.
 
-    It is NOT passed to BigQuery procedure.
+    Passed as a query parameter (not string-interpolated) since
+    run_id originates from an externally-controlled GCS object path.
     """
 
-    # --------------------------------------------------------
-    # IMPORTANT:
-    # Procedure takes ZERO arguments
-    # --------------------------------------------------------
-
     call_query = (
-        f"CALL `{PROJECT_ID}.{GOLD_DATASET}.sp_refresh_all`();"
+        f"CALL `{PROJECT_ID}.{GOLD_DATASET}.sp_refresh_all`(@run_id)"
+    )
+
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ScalarQueryParameter("run_id", "STRING", run_id),
+        ]
     )
 
     query_retry = retry.Retry(
@@ -59,6 +73,7 @@ def run_gold_refresh(run_id: str) -> int:
     try:
         job = bq_client.query(
             call_query,
+            job_config=job_config,
             location=REGION,
         )
 
@@ -128,11 +143,11 @@ def write_gold_audit(
     error_message: str = None,
 ):
     """
-    Writes the overall Gold execution status
-    to ingestion_audit.
+    Writes the overall Gold execution status to ingestion_audit.
 
-    This records whether the complete Gold procedure
-    succeeded or failed.
+    This records whether the complete Gold procedure invocation
+    succeeded or failed, separate from the per-table/per-view rows
+    that sp_refresh_all() writes internally.
     """
 
     table_id = (
@@ -143,40 +158,25 @@ def write_gold_audit(
 
     record = {
         "batch_id": batch_id,
-
         "load_type": "GOLD",
-
         "asset_type": asset_type,
-
         "gcs_path": None,
-
         "expected_file_count": None,
-
         "processed_file_count": None,
-
         "expected_row_count": None,
-
         "loaded_row_count": loaded_row_count,
-
         "status": status,
-
         "started_at": started_at.isoformat(),
-
         "completed_at": (
-            datetime.now(timezone.utc)
-            .isoformat()
+            datetime.now(timezone.utc).isoformat()
         ),
-
         "error_message": (
-            error_message[:5000]
-            if error_message
-            else None
+            error_message[:5000] if error_message else None
         ),
     }
 
     logging.info(
-        "Writing Gold audit. "
-        "batch_id=%s, status=%s",
+        "Writing Gold audit. batch_id=%s, status=%s",
         batch_id,
         status,
     )
@@ -189,36 +189,24 @@ def write_gold_audit(
     )
 
     try:
+        insert_rows = insert_retry(bq_client.insert_rows_json)
 
-        insert_rows = insert_retry(
-            bq_client.insert_rows_json
-        )
-
-        errors = insert_rows(
-            table_id,
-            [record],
-        )
+        errors = insert_rows(table_id, [record])
 
         if errors:
-            logging.error(
-                "Gold audit insert failed: %s",
-                errors,
-            )
-
+            logging.error("Gold audit insert failed: %s", errors)
             raise RuntimeError(
                 f"Failed to write ingestion_audit: {errors}"
             )
 
         logging.info(
-            "Gold audit record written successfully. "
-            "batch_id=%s",
+            "Gold audit record written successfully. batch_id=%s",
             batch_id,
         )
 
     except Exception:
         logging.exception(
-            "Failed to write Gold audit. "
-            "batch_id=%s",
+            "Failed to write Gold audit. batch_id=%s",
             batch_id,
         )
         raise
