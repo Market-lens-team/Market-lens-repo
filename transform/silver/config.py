@@ -68,3 +68,9 @@ SILVER_TRIGGER_SUFFIX = "_ready"
 
 QUARANTINE_PREFIX = "quarantine"
 QUARANTINE_DATASET = "quarantined"
+
+# -------------------------
+# Incremental load window
+# -------------------------
+
+SILVER_LOOKBACK_DAYS = 45
