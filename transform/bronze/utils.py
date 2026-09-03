@@ -5,12 +5,15 @@ Helper functions used by main.py:
     - list_csv_files            : list all CSVs under a GCS prefix
     - chunk_list                : split a list into fixed-size batches
     - create_external_table     : point a temporary BQ table at a batch of GCS files
-    - get_row_count             : count rows in a table (data-loss check)
+    - get_row_count              : count rows in a table (data-loss check)
     - merge_batch_with_symbol   : MERGE a batch into Bronze (update if exists, insert if not)
     - merge_metadata_file       : MERGE the symbols_valid_meta.csv into bronze_symbol_metadata
     - drop_table                : remove a temporary external table
-    - write_audit               : log one row describing how a run went
-    - file_exists               : check if a specific file exists in GCS
+    - write_audit                : log one row describing how a run went
+    - file_exists                : check if a specific file exists in GCS
+
+**CHANGED:** merge_batch_with_symbol() and merge_metadata_file()
+
 """
 
 import logging
@@ -194,27 +197,67 @@ def merge_batch_with_symbol(
 
     This makes re-running the same files safe and prevents
     duplicate symbol + Date records.
+
+    **CHANGED:** The source subquery now applies
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY symbol, Date) = 1 before
+    the MERGE join. If two rows in the same source batch share the
+    same symbol+Date (a source data quality issue - duplicate rows
+    in a CSV), BigQuery's MERGE previously rejected the WHOLE batch
+    with "UPDATE/MERGE must match at most one source row for each
+    target row". Now exactly one row per symbol+Date is kept (an
+    arbitrary choice among duplicates), and the batch succeeds
+    instead of failing outright.
+
+    NOTE: this dedup happens silently - if you want visibility into
+    when it actually triggers, compare expected_rows_this_batch
+    (counted BEFORE this dedup, in main.py) against the rows actually
+    MERGEd. The existing row-count-mismatch warning in main.py will
+    catch this case too, though it currently can't distinguish
+    "duplicates were dropped" from "some rows were updates instead
+    of inserts" - both produce the same kind of mismatch.
     """
 
     merge_query = f"""
         MERGE INTO `{target_table_id}` AS target
 
         USING (
+            -- **CHANGED:** wrap the parsed rows in a dedup step before
+            -- they reach the MERGE join.
             SELECT
-                SAFE.PARSE_DATE('%Y-%m-%d', Date) AS Date,
+                Date,
                 Open,
                 High,
                 Low,
                 Close,
                 Adj_Close,
-                CAST(ROUND(Volume) AS INT64) AS Volume,
+                Volume,
+                symbol
 
-                REGEXP_EXTRACT(
-                    _FILE_NAME,
-                    r'([^/]+)\\.csv$'
-                ) AS symbol
+            FROM (
+                SELECT
+                    SAFE.PARSE_DATE('%Y-%m-%d', Date) AS Date,
+                    Open,
+                    High,
+                    Low,
+                    Close,
+                    Adj_Close,
+                    CAST(ROUND(Volume) AS INT64) AS Volume,
 
-            FROM `{external_table_id}`
+                    REGEXP_EXTRACT(
+                        _FILE_NAME,
+                        r'([^/]+)\\.csv$'
+                    ) AS symbol
+
+                FROM `{external_table_id}`
+            )
+            -- **CHANGED:** keep at most one row per symbol+Date within
+            -- this batch, so a duplicate in the source CSV can no
+            -- longer fail the entire MERGE.
+            QUALIFY ROW_NUMBER() OVER (
+                PARTITION BY symbol, Date
+                ORDER BY symbol
+            ) = 1
+
         ) AS source
 
         ON target.symbol = source.symbol
@@ -281,6 +324,14 @@ def merge_metadata_file(
     The temporary external table is deleted before creation
     to prevent an old autodetected BOOLEAN schema from being
     reused.
+
+    **CHANGED:** The MERGE source is now a dedup subquery
+    (QUALIFY ROW_NUMBER() OVER (PARTITION BY Symbol) = 1) instead of
+    reading directly from the external table. If symbols_valid_meta.csv
+    ever contains two rows for the same Symbol, this previously would
+    have failed the whole metadata load the same way a duplicate
+    symbol+Date would fail a price batch. Now one row per Symbol is
+    kept and the load succeeds.
     """
 
     # --------------------------------------------------------
@@ -412,7 +463,16 @@ def merge_metadata_file(
     merge_query = f"""
         MERGE INTO `{target_table_id}` AS target
 
-        USING `{external_table_id}` AS source
+        USING (
+            -- **CHANGED:** dedup on Symbol before the MERGE join,
+            -- same reasoning as merge_batch_with_symbol() above.
+            SELECT *
+            FROM `{external_table_id}`
+            QUALIFY ROW_NUMBER() OVER (
+                PARTITION BY Symbol
+                ORDER BY Symbol
+            ) = 1
+        ) AS source
 
         ON target.Symbol = source.Symbol
 
@@ -544,6 +604,8 @@ def write_audit(record: dict):
             "Audit row written: %s",
             record.get("batch_id")
         )
+
+
 def write_silver_ready_marker(run_id: str):
     """
     Writes an empty marker file to GCS once Bronze (stock + ETF) has
