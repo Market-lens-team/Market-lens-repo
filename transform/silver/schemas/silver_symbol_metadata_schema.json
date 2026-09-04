@@ -1,0 +1,15 @@
+[
+  { "name": "Nasdaq_Traded", "type": "STRING", "mode": "NULLABLE" },
+  { "name": "symbol", "type": "STRING", "mode": "NULLABLE" },
+  { "name": "security_name", "type": "STRING", "mode": "NULLABLE" },
+  { "name": "listing_exchange", "type": "STRING", "mode": "NULLABLE" },
+  { "name": "market_category", "type": "STRING", "mode": "NULLABLE" },
+  { "name": "ETF", "type": "STRING", "mode": "NULLABLE" },
+  { "name": "asset_type", "type": "STRING", "mode": "NULLABLE" },
+  { "name": "round_lot_size", "type": "FLOAT", "mode": "NULLABLE" },
+  { "name": "Test_Issue", "type": "STRING", "mode": "NULLABLE" },
+  { "name": "financial_status", "type": "STRING", "mode": "NULLABLE" },
+  { "name": "CQS_Symbol", "type": "STRING", "mode": "NULLABLE" },
+  { "name": "NASDAQ_Symbol", "type": "STRING", "mode": "NULLABLE" },
+  { "name": "NextShares", "type": "STRING", "mode": "NULLABLE" }
+]
