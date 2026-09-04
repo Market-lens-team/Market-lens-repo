@@ -1,0 +1,7 @@
+streamlit
+google-adk
+google-genai
+google-cloud-aiplatform
+google-cloud-bigquery
+google-cloud-dataplex
+python-dotenv
