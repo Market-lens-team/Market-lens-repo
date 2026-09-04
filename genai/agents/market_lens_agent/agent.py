@@ -1,7 +1,6 @@
 import os
 
-from dotenv import load_dotenv
-from google.oauth2 import service_account
+from google.auth import default
 
 from google.adk.agents.llm_agent import Agent
 
@@ -18,38 +17,62 @@ from google.adk.integrations.bigquery.config import (
 )
 
 
-# Load service account environment variables
-load_dotenv(
-    "C:/Market_Lens/Market-lens-repo/genai/agents/market_lens_agent/.env"
-)
+# -----------------------------------------
+# Google Cloud configuration
+# -----------------------------------------
+
+os.environ["GOOGLE_CLOUD_PROJECT"] = "market-lens-506611"
+os.environ["GOOGLE_CLOUD_LOCATION"] = "global"
+os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "TRUE"
 
 
-# Authenticate using Service Account
-credentials = service_account.Credentials.from_service_account_file(
-    os.environ["GOOGLE_APPLICATION_CREDENTIALS"]
-)
+# -----------------------------------------
+# Authentication
+#
+# Local:
+#   uses gcloud application default credentials
+#
+# Cloud Run:
+#   uses attached service account:
+#   marketlens-genai-sa@
+#
+# -----------------------------------------
+
+credentials, project = default()
 
 
+# -----------------------------------------
 # BigQuery credentials configuration
+# -----------------------------------------
+
 credentials_config = BigQueryCredentialsConfig(
     credentials=credentials
 )
 
 
+# -----------------------------------------
 # Read-only BigQuery access
+# -----------------------------------------
+
 tool_config = BigQueryToolConfig(
     write_mode=WriteMode.BLOCKED
 )
 
 
+# -----------------------------------------
 # BigQuery Tool
+# -----------------------------------------
+
 bigquery_toolset = BigQueryToolset(
     credentials_config=credentials_config,
     bigquery_tool_config=tool_config,
 )
 
 
+# -----------------------------------------
 # MarketLens Agent
+# -----------------------------------------
+
 root_agent = Agent(
     model="gemini-3.1-flash-lite",
     name="market_lens_agent",
