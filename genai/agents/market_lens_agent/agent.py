@@ -1,69 +1,62 @@
-import google.auth
+import os
+
+from dotenv import load_dotenv
+from google.oauth2 import service_account
 
 from google.adk.agents.llm_agent import Agent
+
+from .prompts.semantic_layer import MARKETLENS_SEMANTIC_LAYER
+
 from google.adk.integrations.bigquery import (
     BigQueryCredentialsConfig,
     BigQueryToolset,
 )
 
-from google.adk.tools.bigquery.config import (
+from google.adk.integrations.bigquery.config import (
     BigQueryToolConfig,
     WriteMode,
 )
 
 
+# Load service account environment variables
+load_dotenv(
+    "C:/Market_Lens/Market-lens-repo/genai/agents/market_lens_agent/.env"
+)
 
-# Get Google Cloud credentials using Application Default Credentials
-credentials, _ = google.auth.default()
 
+# Authenticate using Service Account
+credentials = service_account.Credentials.from_service_account_file(
+    os.environ["GOOGLE_APPLICATION_CREDENTIALS"]
+)
+
+
+# BigQuery credentials configuration
 credentials_config = BigQueryCredentialsConfig(
     credentials=credentials
 )
 
-# Configure BigQuery as READ-ONLY
+
+# Read-only BigQuery access
 tool_config = BigQueryToolConfig(
     write_mode=WriteMode.BLOCKED
 )
 
-# Create the official ADK BigQuery Toolset
+
+# BigQuery Tool
 bigquery_toolset = BigQueryToolset(
     credentials_config=credentials_config,
     bigquery_tool_config=tool_config,
 )
 
 
+# MarketLens Agent
 root_agent = Agent(
     model="gemini-3.1-flash-lite",
     name="market_lens_agent",
-    description="MarketLens financial data analysis agent",
-    instruction="""
-You are the AI assistant for the MarketLens project.
-
-Always use Google Cloud Project:
-market-lens-506611
-
-Never query any other Google Cloud project.
-
-Never use public datasets such as bigquery-public-data unless the user explicitly asks for them.
-
-The project's Gold dataset contains the business-ready data.
-
-Use the Gold dataset to answer every stock and ETF question.
-
-If the user asks about:
-- securities -> use dim_security
-- daily stock metrics -> use fact_daily_metrics
-- screener -> use mart_screener or v_security_screener
-- sector comparison -> use v_sector_comparison
-- top returns -> use v_top_returns
-- drawdowns -> use v_drawdown_by_year
-- unusual volume -> use v_unusual_volume
-
-If the answer cannot be found in the Gold dataset,
-tell the user that the information is unavailable instead of searching another project.
-
-Never invent data.
-Always explain your answer in simple language after executing the query.
-""",
+    description=(
+        "MarketLens financial data analysis agent. "
+        "Always retrieves financial answers from BigQuery Gold layer."
+    ),
+    instruction=MARKETLENS_SEMANTIC_LAYER,
     tools=[bigquery_toolset],
 )
