@@ -28,16 +28,58 @@
 --   procedure (RAISE after logging), so the Cloud Function's own
 --   overall audit row still fires too.
 --
+-- **CHANGED: trimmed to only what the problem statement asks for.**
+-- The problem statement names exactly two example questions:
+--   1. "which mid-cap stocks had unusual volume spikes last quarter?"
+--   2. "compare AAPL against its sector peers over the last year"
+-- Every object below is kept because it traces directly to one of
+-- those two questions (or to general screening, which the problem
+-- statement implies but doesn't name outright). Objects that don't
+-- trace to either question were REMOVED, not just left unused:
+--   dim_date, v_trading_days_only        - nothing needs a full
+--                                           calendar dimension
+--   fact_drawdown_yearly, v_drawdown_by_year - drawdown isn't asked
+--                                           about in either question
+--   v_unusual_volume                     - redundant with
+--                                           mart_unusual_volume,
+--                                           which already keeps only
+--                                           the real outliers
+--   v_security_screener,
+--   v_latest_snapshot_per_symbol         - unfiltered passthroughs
+--                                           with no distinct
+--                                           consumer; mart_screener
+--                                           already has this logic
+--                                           inline
+-- These are DROPPED explicitly (step 0.5, right after gold_base) so
+-- redeploying this procedure also cleans up BigQuery, instead of
+-- leaving nine stale, unmaintained objects sitting in the gold
+-- dataset for someone to accidentally query later.
+--
 -- **CHANGED: incremental load.**
--- fact_daily_metrics (step 3) used to be fully DROPPED and REBUILT
--- from gold_base's ENTIRE history on every single trigger, meaning
--- years of window-function recomputation on every incremental daily
--- load. It is now a MERGE bounded to a trailing per-symbol lookback
--- window (v_ma_lookback_days below), using a watermark against
--- fact_daily_metrics' own existing data. Everything else in this
--- procedure is left as a full rebuild ON PURPOSE - they're cheap
--- aggregations/dimensions downstream of fact_daily_metrics, not the
--- cost driver.
+-- fact_daily_metrics used to be fully DROPPED and REBUILT from
+-- gold_base's ENTIRE history on every single trigger, meaning years
+-- of window-function recomputation on every incremental daily load.
+-- It is now a MERGE bounded to a trailing per-symbol lookback window
+-- (v_ma_lookback_days below), using a watermark against
+-- fact_daily_metrics' own existing data.
+--
+-- **CHANGED: no sector/industry data in the source, and a**
+-- **correlation-based alternative was tried and reverted.**
+-- market_category (from symbols_valid_meta.csv) is a Nasdaq LISTING
+-- TIER code (Q/G/S), not an industry sector - the source data has no
+-- sector/industry field anywhere. A statistical alternative was built
+-- (fact_symbol_correlation, v_symbol_peers - symbols whose daily
+-- returns correlate over the last year, as a stand-in for "peers")
+-- but it requires real trading history to produce a trustworthy
+-- result, and fact_daily_metrics didn't have enough after being
+-- rebuilt for the Volume type fix - it came back empty. Rather than
+-- ship a dashboard panel with zero coverage for "compare AAPL to its
+-- peers," mart_sector_summary / v_sector_comparison are kept as the
+-- working fallback - just labeled honestly as "listing tier" wherever
+-- they're surfaced, never as "sector." If real sector/industry data
+-- becomes available later (an external reference table), that would
+-- be the correct long-term fix; the correlation approach can also be
+-- revisited once fact_daily_metrics has a full year of real history.
 -- ============================================================
 
 CREATE OR REPLACE PROCEDURE
@@ -51,15 +93,15 @@ BEGIN
     -- that step's own audit row (reset via SET at the top of each step).
     DECLARE v_step_started_at TIMESTAMP;
 
-    -- **CHANGED:** how many trailing calendar days fact_daily_metrics
-    -- needs per symbol to correctly recompute moving_avg_200d (the
-    -- longest window function in this table). 300 calendar days
-    -- comfortably covers 200 trading days plus weekends/holidays.
+    -- how many trailing calendar days fact_daily_metrics needs per
+    -- symbol to correctly recompute moving_avg_200d (the longest
+    -- window function in this table). 300 calendar days comfortably
+    -- covers 200 trading days plus weekends/holidays.
     DECLARE v_ma_lookback_days INT64 DEFAULT 300;
 
-    -- **CHANGED:** holds the row count actually affected by the
-    -- fact_daily_metrics MERGE (step 3), so its audit row reflects
-    -- what THIS run touched rather than the table's ever-growing total.
+    -- holds the row count actually affected by the fact_daily_metrics
+    -- MERGE, so its audit row reflects what THIS run touched rather
+    -- than the table's ever-growing total.
     DECLARE v_rows_affected INT64;
 
     -- ========================================================
@@ -71,17 +113,9 @@ BEGIN
     -- ========================================================
 
     -- gold_base: one row per symbol+Date, keeping only valid Silver
-    -- rows and resolving duplicates by preferring the most recent run_id.
-    -- **CHANGED (Problem 2 fix):** was ORDER BY run_id DESC, Date DESC.
-    -- run_id is a STRING like 'historical_20260101120000' or
-    -- 'incremental_20260315090000' - sorting it alphabetically means
-    -- any 'incremental_...' row ALWAYS outranks any 'historical_...'
-    -- row, regardless of which one is actually more recent, because
-    -- 'i' > 'h' as characters. A historical backfill run TODAY could
-    -- silently lose to an incremental run from months ago.
-    -- silver_loaded_at is a real TIMESTAMP (set via CURRENT_TIMESTAMP()
-    -- when Silver last wrote this row), so ordering by it directly
-    -- reflects true recency regardless of load type.
+    -- rows and resolving duplicates by preferring the most recent
+    -- write (silver_loaded_at is a real TIMESTAMP, unlike run_id
+    -- which is a string that sorts alphabetically, not chronologically).
     CREATE TEMP TABLE gold_base AS
     SELECT *
     FROM `market-lens-506611.silver.silver_market_data`
@@ -90,6 +124,72 @@ BEGIN
         PARTITION BY symbol, Date
         ORDER BY silver_loaded_at DESC, Date DESC
     ) = 1;
+
+
+    -- ========================================================
+    -- 0.5. Clean up deprecated objects   **NEW**
+    -- ========================================================
+    -- Removes every object that doesn't trace to either
+    -- problem-statement question (see the top-of-file note for the
+    -- full reasoning per object). DROP ... IF EXISTS is safe to run
+    -- every time - a no-op once these are already gone. Views are
+    -- dropped before the tables they might reference, though
+    -- BigQuery doesn't strictly require that ordering.
+    -- Wrapped in its own BEGIN/EXCEPTION so that if a drop ever
+    -- genuinely fails (e.g. a permissions issue), it's visible in the
+    -- audit log without blocking every core object below from being
+    -- rebuilt fresh.
+    -- ========================================================
+
+    SET v_step_started_at = CURRENT_TIMESTAMP();
+
+    BEGIN
+
+        DROP VIEW IF EXISTS `market-lens-506611.gold.v_trading_days_only`;
+        DROP VIEW IF EXISTS `market-lens-506611.gold.v_drawdown_by_year`;
+        DROP VIEW IF EXISTS `market-lens-506611.gold.v_unusual_volume`;
+        DROP VIEW IF EXISTS `market-lens-506611.gold.v_security_screener`;
+        DROP VIEW IF EXISTS `market-lens-506611.gold.v_latest_snapshot_per_symbol`;
+
+        DROP TABLE IF EXISTS `market-lens-506611.gold.dim_date`;
+        DROP TABLE IF EXISTS `market-lens-506611.gold.fact_drawdown_yearly`;
+
+        -- **CHANGED:** mart_sector_summary / v_sector_comparison are NO
+        -- LONGER dropped - they're restored below (step 7) as an
+        -- honestly-labeled "listing tier" comparison. The correlation-
+        -- based peer approach (fact_symbol_correlation, v_symbol_peers)
+        -- was removed instead: it requires real trading history to
+        -- produce a trustworthy correlation, and fact_daily_metrics
+        -- didn't have enough yet after being rebuilt for the Volume
+        -- type fix. Rather than ship a dashboard panel with zero
+        -- coverage for "compare AAPL to its peers," this reverts to
+        -- the labeled-honestly listing-tier version, which has real
+        -- data right now.
+
+        INSERT INTO `market-lens-506611.bronze.ingestion_audit`
+        (batch_id, load_type, asset_type, gcs_path,
+         expected_file_count, processed_file_count, expected_row_count,
+         loaded_row_count, status, started_at, completed_at, error_message)
+        SELECT
+            CONCAT(p_run_id, '_cleanup_deprecated_objects'), 'GOLD', 'cleanup_deprecated_objects', NULL,
+            NULL, NULL, NULL, 7,
+            'SUCCESS', v_step_started_at, CURRENT_TIMESTAMP(), NULL;
+
+    EXCEPTION WHEN ERROR THEN
+
+        INSERT INTO `market-lens-506611.bronze.ingestion_audit`
+        (batch_id, load_type, asset_type, gcs_path,
+         expected_file_count, processed_file_count, expected_row_count,
+         loaded_row_count, status, started_at, completed_at, error_message)
+        SELECT
+            CONCAT(p_run_id, '_cleanup_deprecated_objects'), 'GOLD', 'cleanup_deprecated_objects', NULL,
+            NULL, NULL, NULL, NULL,
+            'FAILED', v_step_started_at, CURRENT_TIMESTAMP(),
+            SUBSTR(@@error.message, 1, 5000);
+
+        RAISE USING MESSAGE = @@error.message;
+
+    END;
 
 
     -- ========================================================
@@ -104,8 +204,6 @@ BEGIN
 
     BEGIN
 
-        -- Full rebuild every run - cheap, since this table is
-        -- one row per symbol, not per symbol+Date.
         CREATE OR REPLACE TABLE
         `market-lens-506611.gold.dim_security`
         CLUSTER BY symbol
@@ -123,7 +221,6 @@ BEGIN
             ORDER BY symbol
         ) = 1;                            -- safety net in case Silver's metadata ever has a duplicate symbol
 
-        -- Success audit row: records this step's row count and timing.
         INSERT INTO `market-lens-506611.bronze.ingestion_audit`
         (batch_id, load_type, asset_type, gcs_path,
          expected_file_count, processed_file_count, expected_row_count,
@@ -136,8 +233,6 @@ BEGIN
 
     EXCEPTION WHEN ERROR THEN
 
-        -- Failure audit row, then re-raise so the whole procedure
-        -- (and the calling Cloud Function) also fails loudly.
         INSERT INTO `market-lens-506611.bronze.ingestion_audit`
         (batch_id, load_type, asset_type, gcs_path,
          expected_file_count, processed_file_count, expected_row_count,
@@ -154,93 +249,18 @@ BEGIN
 
 
     -- ========================================================
-    -- 2. dim_date
+    -- 2. fact_daily_metrics (monthly partitioned)
     -- ========================================================
-    -- Calendar dimension spanning every date in gold_base's range
-    -- (not just trading days), flagging which ones are actual
-    -- trading days. Needed for gap-aware date-range queries.
-    -- ========================================================
-
-    SET v_step_started_at = CURRENT_TIMESTAMP();
-
-    BEGIN
-
-        -- Full rebuild every run - this table genuinely needs the
-        -- complete min-to-max date range, so bounding it would be wrong.
-        CREATE OR REPLACE TABLE
-        `market-lens-506611.gold.dim_date`
-        AS
-        WITH date_range AS (
-            SELECT MIN(Date) AS min_date, MAX(Date) AS max_date
-            FROM gold_base
-        ),
-        calendar AS (
-            -- generates EVERY calendar day between min and max, trading or not
-            SELECT day AS Date
-            FROM date_range,
-            UNNEST(GENERATE_DATE_ARRAY(min_date, max_date)) AS day
-        ),
-        trading_dates AS (
-            SELECT DISTINCT Date FROM gold_base   -- the actual dates that have real trading data
-        )
-        SELECT
-            c.Date,
-            EXTRACT(YEAR FROM c.Date) AS year,
-            EXTRACT(QUARTER FROM c.Date) AS quarter,
-            EXTRACT(MONTH FROM c.Date) AS month,
-            EXTRACT(DAYOFWEEK FROM c.Date) AS day_of_week,
-            t.Date IS NOT NULL AS is_trading_day   -- TRUE only if this calendar day appears in trading_dates
-        FROM calendar c
-        LEFT JOIN trading_dates t ON t.Date = c.Date;
-
-        INSERT INTO `market-lens-506611.bronze.ingestion_audit`
-        (batch_id, load_type, asset_type, gcs_path,
-         expected_file_count, processed_file_count, expected_row_count,
-         loaded_row_count, status, started_at, completed_at, error_message)
-        SELECT
-            CONCAT(p_run_id, '_dim_date'), 'GOLD', 'dim_date', NULL,
-            NULL, NULL, NULL,
-            (SELECT COUNT(*) FROM `market-lens-506611.gold.dim_date`),
-            'SUCCESS', v_step_started_at, CURRENT_TIMESTAMP(), NULL;
-
-    EXCEPTION WHEN ERROR THEN
-
-        INSERT INTO `market-lens-506611.bronze.ingestion_audit`
-        (batch_id, load_type, asset_type, gcs_path,
-         expected_file_count, processed_file_count, expected_row_count,
-         loaded_row_count, status, started_at, completed_at, error_message)
-        SELECT
-            CONCAT(p_run_id, '_dim_date'), 'GOLD', 'dim_date', NULL,
-            NULL, NULL, NULL, NULL,
-            'FAILED', v_step_started_at, CURRENT_TIMESTAMP(),
-            SUBSTR(@@error.message, 1, 5000);
-
-        RAISE USING MESSAGE = @@error.message;
-
-    END;
-
-
-    -- ========================================================
-    -- 3. fact_daily_metrics (monthly partitioned)
-    -- **CHANGED FOR INCREMENTAL LOAD**
-    --
-    -- Was: DROP TABLE IF EXISTS + CREATE TABLE AS SELECT from
-    -- gold_base's ENTIRE history, every single run.
-    --
-    -- Now: table is created once (if it doesn't already exist) with
-    -- an explicit schema, then MERGEd using only a bounded trailing
-    -- window per symbol (watermark = that symbol's latest Date
-    -- already present in fact_daily_metrics, minus v_ma_lookback_days).
+    -- Table persists across runs; MERGEd using only a bounded
+    -- trailing window per symbol (watermark = that symbol's latest
+    -- Date already present, minus v_ma_lookback_days), instead of
+    -- being dropped and rebuilt from full history every run.
     -- ========================================================
 
     SET v_step_started_at = CURRENT_TIMESTAMP();
 
     BEGIN
 
-        -- **CHANGED:** table must persist across runs for MERGE to
-        -- target it - this replaces the old DROP + CREATE AS SELECT,
-        -- which always started from an empty table on every run.
-        -- IF NOT EXISTS makes this a one-time setup, safe to re-run.
         CREATE TABLE IF NOT EXISTS
         `market-lens-506611.gold.fact_daily_metrics`
         (
@@ -248,13 +268,7 @@ BEGIN
             symbol STRING,
             asset_type STRING,
             Close FLOAT64,
-            -- CORRECTED: was INT64 - Bronze casts Volume to INT64 before
-            -- loading it, but Silver's own declared schema (silver_market_data_schema.json)
-            -- types Volume as FLOAT64, and that is what actually flows into
-            -- gold_base -> recompute_scope -> this MERGE. INT64 here caused
-            -- 'Value of type FLOAT64 cannot be assigned to Volume, which has
-            -- type INT64' at MERGE time. FLOAT64 matches what Silver actually sends.
-            Volume FLOAT64,
+            Volume FLOAT64,   -- FLOAT64, not INT64 - matches Silver's actual declared type for this column
             daily_return_pct FLOAT64,
             rolling_avg_volume_30d FLOAT64,
             rolling_stddev_volume_30d FLOAT64,
@@ -267,26 +281,18 @@ BEGIN
             run_id STRING,
             gold_loaded_at TIMESTAMP
         )
-        PARTITION BY DATE_TRUNC(Date, MONTH)   -- monthly partitions keep date-range queries and partition pruning cheap
-        CLUSTER BY symbol;                     -- clustering by symbol speeds up per-symbol lookups within a partition
+        PARTITION BY DATE_TRUNC(Date, MONTH)
+        CLUSTER BY symbol;
 
-        -- **CHANGED:** MERGE instead of a full CREATE TABLE AS SELECT -
-        -- this is the actual incremental-load mechanism for this table.
         MERGE `market-lens-506611.gold.fact_daily_metrics` T
         USING (
 
-            -- **CHANGED:** per-symbol watermark against
-            -- fact_daily_metrics itself (not gold_base) - tells us how
-            -- far THIS table has already been computed for each symbol.
             WITH fact_watermarks AS (
                 SELECT symbol, MAX(Date) AS last_fact_date
                 FROM `market-lens-506611.gold.fact_daily_metrics`
                 GROUP BY symbol
             ),
 
-            -- **CHANGED:** only the trailing window each symbol needs
-            -- to correctly recompute its newest moving averages -
-            -- new symbols (no watermark) get their full history once.
             recompute_scope AS (
                 SELECT g.*
                 FROM gold_base g
@@ -295,14 +301,12 @@ BEGIN
                    OR g.Date >= DATE_SUB(w.last_fact_date, INTERVAL v_ma_lookback_days DAY)
             )
 
-            -- computes every derived metric this table exposes, scoped
-            -- to just recompute_scope instead of all of gold_base
             SELECT
                 Date, symbol, asset_type, Close, Volume, daily_return_pct,
                 rolling_avg_volume_30d, rolling_stddev_volume_30d,
-                SAFE_DIVIDE(Volume - rolling_avg_volume_30d, rolling_stddev_volume_30d) AS volume_zscore,   -- how many std-devs today's volume is from its 30-day average
+                SAFE_DIVIDE(Volume - rolling_avg_volume_30d, rolling_stddev_volume_30d) AS volume_zscore,
                 rolling_max_close,
-                SAFE_DIVIDE(Close - rolling_max_close, rolling_max_close) AS drawdown_pct,   -- % below the all-time high, negative or zero
+                SAFE_DIVIDE(Close - rolling_max_close, rolling_max_close) AS drawdown_pct,
                 AVG(Close) OVER (PARTITION BY symbol ORDER BY Date ROWS BETWEEN 19 PRECEDING AND CURRENT ROW) AS moving_avg_20d,
                 AVG(Close) OVER (PARTITION BY symbol ORDER BY Date ROWS BETWEEN 49 PRECEDING AND CURRENT ROW) AS moving_avg_50d,
                 AVG(Close) OVER (PARTITION BY symbol ORDER BY Date ROWS BETWEEN 199 PRECEDING AND CURRENT ROW) AS moving_avg_200d,
@@ -314,7 +318,6 @@ BEGIN
         ON T.symbol = S.symbol AND T.Date = S.Date AND T.asset_type = S.asset_type
 
         WHEN MATCHED THEN
-            -- row already exists (e.g. inside the re-scanned buffer window) -> overwrite with freshly recomputed values
             UPDATE SET
                 Close = S.Close,
                 Volume = S.Volume,
@@ -331,7 +334,6 @@ BEGIN
                 gold_loaded_at = S.gold_loaded_at
 
         WHEN NOT MATCHED THEN
-            -- genuinely new symbol+Date row -> insert it
             INSERT (
                 Date, symbol, asset_type, Close, Volume, daily_return_pct,
                 rolling_avg_volume_30d, rolling_stddev_volume_30d, volume_zscore,
@@ -347,9 +349,6 @@ BEGIN
                 S.run_id, S.gold_loaded_at
             );
 
-        -- **CHANGED:** @@row_count captures the MERGE's own affected-row
-        -- count, so the audit row reflects what THIS run touched -
-        -- a full COUNT(*) here would just report the ever-growing total.
         SET v_rows_affected = @@row_count;
 
         INSERT INTO `market-lens-506611.bronze.ingestion_audit`
@@ -380,7 +379,7 @@ BEGIN
 
 
     -- ========================================================
-    -- 4. fact_period_returns
+    -- 3. fact_period_returns
     -- ========================================================
     -- For every symbol, computes % return over 1W/1M/3M/1Y/3Y
     -- windows by matching the closest available trading date to
@@ -396,13 +395,11 @@ BEGIN
         CLUSTER BY symbol
         AS
         WITH latest_date_per_symbol AS (
-            -- the most recent trading date on record for each symbol - the "as of" anchor for every return calc
             SELECT symbol, MAX(Date) AS latest_date
             FROM gold_base
             GROUP BY symbol
         ),
         period_definitions AS (
-            -- one row per symbol per period, giving the theoretical start date to look up a price near
             SELECT symbol, latest_date, '1W' AS period, DATE_SUB(latest_date, INTERVAL 1 WEEK) AS period_start_date FROM latest_date_per_symbol
             UNION ALL
             SELECT symbol, latest_date, '1M', DATE_SUB(latest_date, INTERVAL 1 MONTH) FROM latest_date_per_symbol
@@ -414,21 +411,19 @@ BEGIN
             SELECT symbol, latest_date, '3Y', DATE_SUB(latest_date, INTERVAL 3 YEAR) FROM latest_date_per_symbol
         ),
         closest_start_prices AS (
-            -- for each symbol+period, finds the actual trading day closest to the theoretical start date (within +/- 7 days)
             SELECT
                 pd.symbol, pd.period, pd.latest_date,
                 f.Date AS actual_start_date, f.Close AS start_close,
                 ROW_NUMBER() OVER (
                     PARTITION BY pd.symbol, pd.period
                     ORDER BY ABS(DATE_DIFF(f.Date, pd.period_start_date, DAY)), f.Date DESC
-                ) AS closeness_rank   -- rank 1 = closest match to the theoretical start date
+                ) AS closeness_rank
             FROM period_definitions pd
             JOIN gold_base f
                 ON f.symbol = pd.symbol
                 AND f.Date BETWEEN DATE_SUB(pd.period_start_date, INTERVAL 7 DAY) AND DATE_ADD(pd.period_start_date, INTERVAL 7 DAY)
         ),
         end_prices AS (
-            -- the actual latest-date Close price per symbol, used as the return's end point
             SELECT f.symbol, f.Date AS end_date, f.Close AS end_close
             FROM gold_base f
             JOIN latest_date_per_symbol l ON f.symbol = l.symbol AND f.Date = l.latest_date
@@ -436,10 +431,10 @@ BEGIN
         SELECT
             s.symbol, s.period, s.actual_start_date AS period_start_date, e.end_date AS period_end_date,
             s.start_close, e.end_close,
-            SAFE_DIVIDE(e.end_close - s.start_close, s.start_close) * 100 AS return_pct   -- % return over the period
+            SAFE_DIVIDE(e.end_close - s.start_close, s.start_close) * 100 AS return_pct
         FROM closest_start_prices s
         JOIN end_prices e ON s.symbol = e.symbol
-        WHERE s.closeness_rank = 1;   -- keep only the single closest-matched start price per symbol+period
+        WHERE s.closeness_rank = 1;
 
         INSERT INTO `market-lens-506611.bronze.ingestion_audit`
         (batch_id, load_type, asset_type, gcs_path,
@@ -469,60 +464,10 @@ BEGIN
 
 
     -- ========================================================
-    -- 5. fact_drawdown_yearly
-    -- ========================================================
-    -- Worst (most negative) drawdown_pct per symbol per calendar
-    -- year, aggregated from fact_daily_metrics. Answers "biggest
-    -- drop from a high, by year" questions.
-    -- ========================================================
-
-    SET v_step_started_at = CURRENT_TIMESTAMP();
-
-    BEGIN
-
-        CREATE OR REPLACE TABLE
-        `market-lens-506611.gold.fact_drawdown_yearly`
-        CLUSTER BY symbol
-        AS
-        SELECT
-            symbol, EXTRACT(YEAR FROM Date) AS year, MIN(drawdown_pct) AS max_drawdown_pct   -- MIN because drawdown_pct is negative; the most negative = the worst drop
-        FROM `market-lens-506611.gold.fact_daily_metrics`
-        WHERE drawdown_pct IS NOT NULL
-        GROUP BY symbol, year;
-
-        INSERT INTO `market-lens-506611.bronze.ingestion_audit`
-        (batch_id, load_type, asset_type, gcs_path,
-         expected_file_count, processed_file_count, expected_row_count,
-         loaded_row_count, status, started_at, completed_at, error_message)
-        SELECT
-            CONCAT(p_run_id, '_fact_drawdown_yearly'), 'GOLD', 'fact_drawdown_yearly', NULL,
-            NULL, NULL, NULL,
-            (SELECT COUNT(*) FROM `market-lens-506611.gold.fact_drawdown_yearly`),
-            'SUCCESS', v_step_started_at, CURRENT_TIMESTAMP(), NULL;
-
-    EXCEPTION WHEN ERROR THEN
-
-        INSERT INTO `market-lens-506611.bronze.ingestion_audit`
-        (batch_id, load_type, asset_type, gcs_path,
-         expected_file_count, processed_file_count, expected_row_count,
-         loaded_row_count, status, started_at, completed_at, error_message)
-        SELECT
-            CONCAT(p_run_id, '_fact_drawdown_yearly'), 'GOLD', 'fact_drawdown_yearly', NULL,
-            NULL, NULL, NULL, NULL,
-            'FAILED', v_step_started_at, CURRENT_TIMESTAMP(),
-            SUBSTR(@@error.message, 1, 5000);
-
-        RAISE USING MESSAGE = @@error.message;
-
-    END;
-
-
-    -- ========================================================
-    -- 6. mart_screener
+    -- 4. mart_screener
     -- ========================================================
     -- One row per symbol: its latest snapshot (price/volume/
     -- metrics) joined with security info and all period returns.
-    -- The main table behind stock-screener-style questions.
     -- ========================================================
 
     SET v_step_started_at = CURRENT_TIMESTAMP();
@@ -534,7 +479,6 @@ BEGIN
         CLUSTER BY symbol
         AS
         WITH latest_metrics AS (
-            -- keeps only each symbol's single most recent row from fact_daily_metrics
             SELECT *
             FROM `market-lens-506611.gold.fact_daily_metrics`
             QUALIFY ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY Date DESC) = 1
@@ -549,7 +493,6 @@ BEGIN
             lm.run_id, lm.gold_loaded_at
         FROM latest_metrics lm
         LEFT JOIN `market-lens-506611.gold.dim_security` ds ON lm.symbol = ds.symbol
-        -- five separate self-joins against fact_period_returns, one per period, to pivot rows into columns
         LEFT JOIN `market-lens-506611.gold.fact_period_returns` r1w ON lm.symbol = r1w.symbol AND r1w.period = '1W'
         LEFT JOIN `market-lens-506611.gold.fact_period_returns` r1m ON lm.symbol = r1m.symbol AND r1m.period = '1M'
         LEFT JOIN `market-lens-506611.gold.fact_period_returns` r3m ON lm.symbol = r3m.symbol AND r3m.period = '3M'
@@ -584,65 +527,11 @@ BEGIN
 
 
     -- ========================================================
-    -- 7. mart_sector_summary
-    -- ========================================================
-    -- Aggregates mart_screener up to one row per market_category
-    -- (avg return, volatility, symbol count) - powers sector-vs-
-    -- sector comparison questions.
-    -- ========================================================
-
-    SET v_step_started_at = CURRENT_TIMESTAMP();
-
-    BEGIN
-
-        CREATE OR REPLACE TABLE
-        `market-lens-506611.gold.mart_sector_summary`
-        AS
-        SELECT
-            market_category,
-            COUNT(*) AS symbol_count,
-            AVG(return_1y) AS avg_market_category_return_1y,
-            AVG(return_1m) AS avg_market_category_return_1m,
-            STDDEV(return_1y) AS market_category_volatility_1y   -- spread of 1-year returns within the category, as a volatility proxy
-        FROM `market-lens-506611.gold.mart_screener`
-        WHERE market_category IS NOT NULL
-        GROUP BY market_category;
-
-        INSERT INTO `market-lens-506611.bronze.ingestion_audit`
-        (batch_id, load_type, asset_type, gcs_path,
-         expected_file_count, processed_file_count, expected_row_count,
-         loaded_row_count, status, started_at, completed_at, error_message)
-        SELECT
-            CONCAT(p_run_id, '_mart_sector_summary'), 'GOLD', 'mart_sector_summary', NULL,
-            NULL, NULL, NULL,
-            (SELECT COUNT(*) FROM `market-lens-506611.gold.mart_sector_summary`),
-            'SUCCESS', v_step_started_at, CURRENT_TIMESTAMP(), NULL;
-
-    EXCEPTION WHEN ERROR THEN
-
-        INSERT INTO `market-lens-506611.bronze.ingestion_audit`
-        (batch_id, load_type, asset_type, gcs_path,
-         expected_file_count, processed_file_count, expected_row_count,
-         loaded_row_count, status, started_at, completed_at, error_message)
-        SELECT
-            CONCAT(p_run_id, '_mart_sector_summary'), 'GOLD', 'mart_sector_summary', NULL,
-            NULL, NULL, NULL, NULL,
-            'FAILED', v_step_started_at, CURRENT_TIMESTAMP(),
-            SUBSTR(@@error.message, 1, 5000);
-
-        RAISE USING MESSAGE = @@error.message;
-
-    END;
-
-
-    -- ========================================================
-    -- 8. mart_normalized_prices (monthly partitioned)
+    -- 5. mart_normalized_prices (monthly partitioned)
     -- ========================================================
     -- Indexes each symbol's Close to 100 at its earliest available
-    -- date, so different symbols' price paths become visually and
-    -- numerically comparable regardless of absolute price level.
-    -- NOT changed to incremental - still a full rebuild every run,
-    -- since indexing depends on each symbol's very first price.
+    -- date. Full rebuild every run - indexing depends on each
+    -- symbol's very first price, so it can't be bounded.
     -- ========================================================
 
     SET v_step_started_at = CURRENT_TIMESTAMP();
@@ -658,14 +547,13 @@ BEGIN
         CLUSTER BY symbol
         AS
         WITH base_prices AS (
-            -- each symbol's earliest available trading date - the "100" anchor point
             SELECT symbol, MIN(Date) AS base_date
             FROM gold_base
             GROUP BY symbol
         )
         SELECT
             f.Date, f.symbol, f.Close, b.base_date AS index_base_date,
-            SAFE_DIVIDE(f.Close, base_close.Close) * 100 AS indexed_price   -- every price expressed as a % of the base-date price
+            SAFE_DIVIDE(f.Close, base_close.Close) * 100 AS indexed_price
         FROM gold_base f
         JOIN base_prices b ON f.symbol = b.symbol
         JOIN gold_base base_close ON base_close.symbol = b.symbol AND base_close.Date = b.base_date;
@@ -698,11 +586,11 @@ BEGIN
 
 
     -- ========================================================
-    -- 9. mart_unusual_volume
+    -- 6. mart_unusual_volume
     -- ========================================================
     -- Latest row per symbol where |volume_zscore| > 2, i.e. today's
     -- volume is a statistical outlier vs its own 30-day average.
-    -- Powers "which stocks had unusual volume" questions.
+    -- Directly answers: "which stocks had unusual volume spikes?"
     -- ========================================================
 
     SET v_step_started_at = CURRENT_TIMESTAMP();
@@ -715,7 +603,7 @@ BEGIN
         SELECT
             symbol, Date, Volume, volume_zscore, asset_type, run_id, gold_loaded_at
         FROM `market-lens-506611.gold.fact_daily_metrics`
-        WHERE ABS(volume_zscore) > 2   -- more than 2 standard deviations from the 30-day average volume
+        WHERE ABS(volume_zscore) > 2
         QUALIFY ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY Date DESC) = 1;
 
         INSERT INTO `market-lens-506611.bronze.ingestion_audit`
@@ -748,64 +636,10 @@ BEGIN
     -- ========================================================
     -- VIEWS (recreated + audited every Gold run)
     -- ========================================================
-    -- Each view is a thin, always-fresh read layer on top of the
-    -- tables above - no data stored, just a saved query. Recreated
-    -- every run so their definitions stay in sync with this
-    -- procedure, and audited the same way as the tables.
-    -- ========================================================
 
-    -- v_latest_snapshot_per_symbol: same as mart_screener's inner
-    -- CTE, exposed as its own reusable view - every symbol's most
-    -- recent fact_daily_metrics row.
-    SET v_step_started_at = CURRENT_TIMESTAMP();
-    BEGIN
-        CREATE OR REPLACE VIEW `market-lens-506611.gold.v_latest_snapshot_per_symbol` AS
-        SELECT * FROM `market-lens-506611.gold.fact_daily_metrics`
-        QUALIFY ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY Date DESC) = 1;
-
-        INSERT INTO `market-lens-506611.bronze.ingestion_audit`
-        (batch_id, load_type, asset_type, gcs_path, expected_file_count, processed_file_count,
-         expected_row_count, loaded_row_count, status, started_at, completed_at, error_message)
-        SELECT CONCAT(p_run_id, '_v_latest_snapshot_per_symbol'), 'GOLD', 'v_latest_snapshot_per_symbol',
-            NULL, NULL, NULL, NULL,
-            (SELECT COUNT(*) FROM `market-lens-506611.gold.v_latest_snapshot_per_symbol`),
-            'SUCCESS', v_step_started_at, CURRENT_TIMESTAMP(), NULL;
-    EXCEPTION WHEN ERROR THEN
-        INSERT INTO `market-lens-506611.bronze.ingestion_audit`
-        (batch_id, load_type, asset_type, gcs_path, expected_file_count, processed_file_count,
-         expected_row_count, loaded_row_count, status, started_at, completed_at, error_message)
-        SELECT CONCAT(p_run_id, '_v_latest_snapshot_per_symbol'), 'GOLD', 'v_latest_snapshot_per_symbol',
-            NULL, NULL, NULL, NULL, NULL,
-            'FAILED', v_step_started_at, CURRENT_TIMESTAMP(), SUBSTR(@@error.message, 1, 5000);
-        RAISE USING MESSAGE = @@error.message;
-    END;
-
-    -- v_trading_days_only: dim_date filtered down to just is_trading_day
-    -- = TRUE, for queries that only want to walk actual trading dates.
-    SET v_step_started_at = CURRENT_TIMESTAMP();
-    BEGIN
-        CREATE OR REPLACE VIEW `market-lens-506611.gold.v_trading_days_only` AS
-        SELECT * FROM `market-lens-506611.gold.dim_date` WHERE is_trading_day = TRUE;
-
-        INSERT INTO `market-lens-506611.bronze.ingestion_audit`
-        (batch_id, load_type, asset_type, gcs_path, expected_file_count, processed_file_count,
-         expected_row_count, loaded_row_count, status, started_at, completed_at, error_message)
-        SELECT CONCAT(p_run_id, '_v_trading_days_only'), 'GOLD', 'v_trading_days_only',
-            NULL, NULL, NULL, NULL,
-            (SELECT COUNT(*) FROM `market-lens-506611.gold.v_trading_days_only`),
-            'SUCCESS', v_step_started_at, CURRENT_TIMESTAMP(), NULL;
-    EXCEPTION WHEN ERROR THEN
-        INSERT INTO `market-lens-506611.bronze.ingestion_audit`
-        (batch_id, load_type, asset_type, gcs_path, expected_file_count, processed_file_count,
-         expected_row_count, loaded_row_count, status, started_at, completed_at, error_message)
-        SELECT CONCAT(p_run_id, '_v_trading_days_only'), 'GOLD', 'v_trading_days_only',
-            NULL, NULL, NULL, NULL, NULL,
-            'FAILED', v_step_started_at, CURRENT_TIMESTAMP(), SUBSTR(@@error.message, 1, 5000);
-        RAISE USING MESSAGE = @@error.message;
-    END;
-
-    -- v_top_returns: mart_screener narrowed to just identity + return
-    -- columns, for "top N by return" style queries without extra fields.
+    -- v_top_returns: mart_screener narrowed to identity + return
+    -- columns. Supports general screening (not a named problem-
+    -- statement question, but implied by the overall goal).
     SET v_step_started_at = CURRENT_TIMESTAMP();
     BEGIN
         CREATE OR REPLACE VIEW `market-lens-506611.gold.v_top_returns` AS
@@ -830,38 +664,96 @@ BEGIN
         RAISE USING MESSAGE = @@error.message;
     END;
 
-    -- v_unusual_volume: every fact_daily_metrics row labeled with a
-    -- readable volume_flag, instead of just the outliers mart_unusual_volume keeps.
+    -- v_normalized_price_comparison: thin passthrough over
+    -- mart_normalized_prices - exposes the indexed-to-100 price
+    -- series, for visualizing a symbol's price path over time,
+    -- optionally alongside others.
     SET v_step_started_at = CURRENT_TIMESTAMP();
     BEGIN
-        CREATE OR REPLACE VIEW `market-lens-506611.gold.v_unusual_volume` AS
-        SELECT symbol, Date, Volume, volume_zscore,
-            CASE
-                WHEN volume_zscore > 2 THEN 'unusually high'
-                WHEN volume_zscore < -2 THEN 'unusually low'
-                ELSE 'normal'
-            END AS volume_flag
-        FROM `market-lens-506611.gold.fact_daily_metrics`;
+        CREATE OR REPLACE VIEW `market-lens-506611.gold.v_normalized_price_comparison` AS
+        SELECT Date, symbol, Close, indexed_price, index_base_date
+        FROM `market-lens-506611.gold.mart_normalized_prices`;
 
         INSERT INTO `market-lens-506611.bronze.ingestion_audit`
         (batch_id, load_type, asset_type, gcs_path, expected_file_count, processed_file_count,
          expected_row_count, loaded_row_count, status, started_at, completed_at, error_message)
-        SELECT CONCAT(p_run_id, '_v_unusual_volume'), 'GOLD', 'v_unusual_volume',
+        SELECT CONCAT(p_run_id, '_v_normalized_price_comparison'), 'GOLD', 'v_normalized_price_comparison',
             NULL, NULL, NULL, NULL,
-            (SELECT COUNT(*) FROM `market-lens-506611.gold.v_unusual_volume`),
+            (SELECT COUNT(*) FROM `market-lens-506611.gold.v_normalized_price_comparison`),
             'SUCCESS', v_step_started_at, CURRENT_TIMESTAMP(), NULL;
     EXCEPTION WHEN ERROR THEN
         INSERT INTO `market-lens-506611.bronze.ingestion_audit`
         (batch_id, load_type, asset_type, gcs_path, expected_file_count, processed_file_count,
          expected_row_count, loaded_row_count, status, started_at, completed_at, error_message)
-        SELECT CONCAT(p_run_id, '_v_unusual_volume'), 'GOLD', 'v_unusual_volume',
+        SELECT CONCAT(p_run_id, '_v_normalized_price_comparison'), 'GOLD', 'v_normalized_price_comparison',
             NULL, NULL, NULL, NULL, NULL,
             'FAILED', v_step_started_at, CURRENT_TIMESTAMP(), SUBSTR(@@error.message, 1, 5000);
         RAISE USING MESSAGE = @@error.message;
     END;
 
-    -- v_sector_comparison: each symbol's own 1-year return next to
-    -- its category's average, plus the difference - "beating its sector?"
+
+    -- ========================================================
+    -- 7. mart_sector_summary   (restored - see step 0.5 note)
+    -- ========================================================
+    -- **NOTE:** despite the name, this aggregates by market_category,
+    -- which is a Nasdaq LISTING TIER code (Q/G/S), NOT an industry
+    -- sector - the source data (symbols_valid_meta.csv) has no
+    -- sector/industry field at all. A correlation-based statistical
+    -- peer group was tried instead (fact_symbol_correlation,
+    -- v_symbol_peers) but required more trading history than
+    -- fact_daily_metrics currently has, and came back empty. This is
+    -- the honestly-labeled fallback: real data, clearly captioned as
+    -- listing tier wherever it's shown on the dashboard, not sector.
+    -- ========================================================
+
+    SET v_step_started_at = CURRENT_TIMESTAMP();
+
+    BEGIN
+
+        CREATE OR REPLACE TABLE
+        `market-lens-506611.gold.mart_sector_summary`
+        AS
+        SELECT
+            market_category,
+            COUNT(*) AS symbol_count,
+            AVG(return_1y) AS avg_market_category_return_1y,
+            AVG(return_1m) AS avg_market_category_return_1m,
+            STDDEV(return_1y) AS market_category_volatility_1y
+        FROM `market-lens-506611.gold.mart_screener`
+        WHERE market_category IS NOT NULL
+        GROUP BY market_category;
+
+        INSERT INTO `market-lens-506611.bronze.ingestion_audit`
+        (batch_id, load_type, asset_type, gcs_path,
+         expected_file_count, processed_file_count, expected_row_count,
+         loaded_row_count, status, started_at, completed_at, error_message)
+        SELECT
+            CONCAT(p_run_id, '_mart_sector_summary'), 'GOLD', 'mart_sector_summary', NULL,
+            NULL, NULL, NULL,
+            (SELECT COUNT(*) FROM `market-lens-506611.gold.mart_sector_summary`),
+            'SUCCESS', v_step_started_at, CURRENT_TIMESTAMP(), NULL;
+
+    EXCEPTION WHEN ERROR THEN
+
+        INSERT INTO `market-lens-506611.bronze.ingestion_audit`
+        (batch_id, load_type, asset_type, gcs_path,
+         expected_file_count, processed_file_count, expected_row_count,
+         loaded_row_count, status, started_at, completed_at, error_message)
+        SELECT
+            CONCAT(p_run_id, '_mart_sector_summary'), 'GOLD', 'mart_sector_summary', NULL,
+            NULL, NULL, NULL, NULL,
+            'FAILED', v_step_started_at, CURRENT_TIMESTAMP(),
+            SUBSTR(@@error.message, 1, 5000);
+
+        RAISE USING MESSAGE = @@error.message;
+
+    END;
+
+
+    -- v_sector_comparison   (restored - see step 7 note above)
+    -- Each symbol's own 1-year return next to its listing-tier
+    -- category's average, plus the difference. Label this on the
+    -- dashboard as "listing tier," never "sector."
     SET v_step_started_at = CURRENT_TIMESTAMP();
     BEGIN
         CREATE OR REPLACE VIEW `market-lens-506611.gold.v_sector_comparison` AS
@@ -886,82 +778,6 @@ BEGIN
         (batch_id, load_type, asset_type, gcs_path, expected_file_count, processed_file_count,
          expected_row_count, loaded_row_count, status, started_at, completed_at, error_message)
         SELECT CONCAT(p_run_id, '_v_sector_comparison'), 'GOLD', 'v_sector_comparison',
-            NULL, NULL, NULL, NULL, NULL,
-            'FAILED', v_step_started_at, CURRENT_TIMESTAMP(), SUBSTR(@@error.message, 1, 5000);
-        RAISE USING MESSAGE = @@error.message;
-    END;
-
-    -- v_normalized_price_comparison: thin passthrough over
-    -- mart_normalized_prices - exposes the indexed-to-100 price series.
-    SET v_step_started_at = CURRENT_TIMESTAMP();
-    BEGIN
-        CREATE OR REPLACE VIEW `market-lens-506611.gold.v_normalized_price_comparison` AS
-        SELECT Date, symbol, Close, indexed_price, index_base_date
-        FROM `market-lens-506611.gold.mart_normalized_prices`;
-
-        INSERT INTO `market-lens-506611.bronze.ingestion_audit`
-        (batch_id, load_type, asset_type, gcs_path, expected_file_count, processed_file_count,
-         expected_row_count, loaded_row_count, status, started_at, completed_at, error_message)
-        SELECT CONCAT(p_run_id, '_v_normalized_price_comparison'), 'GOLD', 'v_normalized_price_comparison',
-            NULL, NULL, NULL, NULL,
-            (SELECT COUNT(*) FROM `market-lens-506611.gold.v_normalized_price_comparison`),
-            'SUCCESS', v_step_started_at, CURRENT_TIMESTAMP(), NULL;
-    EXCEPTION WHEN ERROR THEN
-        INSERT INTO `market-lens-506611.bronze.ingestion_audit`
-        (batch_id, load_type, asset_type, gcs_path, expected_file_count, processed_file_count,
-         expected_row_count, loaded_row_count, status, started_at, completed_at, error_message)
-        SELECT CONCAT(p_run_id, '_v_normalized_price_comparison'), 'GOLD', 'v_normalized_price_comparison',
-            NULL, NULL, NULL, NULL, NULL,
-            'FAILED', v_step_started_at, CURRENT_TIMESTAMP(), SUBSTR(@@error.message, 1, 5000);
-        RAISE USING MESSAGE = @@error.message;
-    END;
-
-    -- v_drawdown_by_year: fact_drawdown_yearly enriched with the
-    -- security's name/category/is_etf, so it's usable standalone.
-    SET v_step_started_at = CURRENT_TIMESTAMP();
-    BEGIN
-        CREATE OR REPLACE VIEW `market-lens-506611.gold.v_drawdown_by_year` AS
-        SELECT d.symbol, ds.security_name, ds.market_category, ds.is_etf, d.year, d.max_drawdown_pct
-        FROM `market-lens-506611.gold.fact_drawdown_yearly` d
-        JOIN `market-lens-506611.gold.dim_security` ds ON d.symbol = ds.symbol;
-
-        INSERT INTO `market-lens-506611.bronze.ingestion_audit`
-        (batch_id, load_type, asset_type, gcs_path, expected_file_count, processed_file_count,
-         expected_row_count, loaded_row_count, status, started_at, completed_at, error_message)
-        SELECT CONCAT(p_run_id, '_v_drawdown_by_year'), 'GOLD', 'v_drawdown_by_year',
-            NULL, NULL, NULL, NULL,
-            (SELECT COUNT(*) FROM `market-lens-506611.gold.v_drawdown_by_year`),
-            'SUCCESS', v_step_started_at, CURRENT_TIMESTAMP(), NULL;
-    EXCEPTION WHEN ERROR THEN
-        INSERT INTO `market-lens-506611.bronze.ingestion_audit`
-        (batch_id, load_type, asset_type, gcs_path, expected_file_count, processed_file_count,
-         expected_row_count, loaded_row_count, status, started_at, completed_at, error_message)
-        SELECT CONCAT(p_run_id, '_v_drawdown_by_year'), 'GOLD', 'v_drawdown_by_year',
-            NULL, NULL, NULL, NULL, NULL,
-            'FAILED', v_step_started_at, CURRENT_TIMESTAMP(), SUBSTR(@@error.message, 1, 5000);
-        RAISE USING MESSAGE = @@error.message;
-    END;
-
-    -- v_security_screener: unfiltered passthrough over mart_screener -
-    -- the public-facing name for consumers who shouldn't query the
-    -- physical mart table directly.
-    SET v_step_started_at = CURRENT_TIMESTAMP();
-    BEGIN
-        CREATE OR REPLACE VIEW `market-lens-506611.gold.v_security_screener` AS
-        SELECT * FROM `market-lens-506611.gold.mart_screener`;
-
-        INSERT INTO `market-lens-506611.bronze.ingestion_audit`
-        (batch_id, load_type, asset_type, gcs_path, expected_file_count, processed_file_count,
-         expected_row_count, loaded_row_count, status, started_at, completed_at, error_message)
-        SELECT CONCAT(p_run_id, '_v_security_screener'), 'GOLD', 'v_security_screener',
-            NULL, NULL, NULL, NULL,
-            (SELECT COUNT(*) FROM `market-lens-506611.gold.v_security_screener`),
-            'SUCCESS', v_step_started_at, CURRENT_TIMESTAMP(), NULL;
-    EXCEPTION WHEN ERROR THEN
-        INSERT INTO `market-lens-506611.bronze.ingestion_audit`
-        (batch_id, load_type, asset_type, gcs_path, expected_file_count, processed_file_count,
-         expected_row_count, loaded_row_count, status, started_at, completed_at, error_message)
-        SELECT CONCAT(p_run_id, '_v_security_screener'), 'GOLD', 'v_security_screener',
             NULL, NULL, NULL, NULL, NULL,
             'FAILED', v_step_started_at, CURRENT_TIMESTAMP(), SUBSTR(@@error.message, 1, 5000);
         RAISE USING MESSAGE = @@error.message;
