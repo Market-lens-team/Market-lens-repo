@@ -103,21 +103,16 @@ def ensure_silver_tables_exist():
 
 
 def build_silver_query(run_id: str) -> str:
-    """
-    Builds the Bronze -> Silver transformation query.
-
-    Steps:
+    """Conditions taken for silver
       1. UNION stocks + ETFs into one set, tagging asset_type.
-      2. **CHANGED:** Bound each symbol's Bronze rows to a trailing
-         lookback window instead of that symbol's full history, using
-         a per-symbol watermark (MAX(Date) already in Silver). A
-         symbol with no watermark yet (never loaded into Silver) is
-         NOT bounded - it gets its full available history once.
+      2. For a symbol that we have already processed, we don't read its entire history again. 
+      We look at its latest date in Silver and go back only a certain number of days (45 days in our case).But if it's a completely new symbol 
+      that Silver has never seen before, there is no previous date to start from, so we load its entire available history the first time.
       3. Clean bad data: zero prices, High < Low, out-of-range Adj_Close.
-      4. Join in symbol metadata (security_name, listing_exchange, market_category).
+      4. Join in symbol metadata (security_name).
       5. Compute rolling/derived metrics per symbol using window functions,
          over the bounded window from step 2.
-      6. **CHANGED:** rolling_max_close is an ALL-TIME running max, which
+      6. rolling_max_close is an ALL-TIME running max, which
          a trimmed window alone cannot compute correctly. It is now
          seeded from the highest rolling_max_close Silver already has
          on record for that symbol.
