@@ -90,12 +90,12 @@ st.markdown(
 # -----------------------------------
 
 EXAMPLE_QUESTIONS = [
-    "Was TSLA's volume unusual last month?",
-    "Compare MSFT, GOOGL, and AAPL over the last 3 years, normalized",
-    "Which ETFs had the lowest drawdown in 2020?",
-    "Show me the top 10 stocks by 1-year return",
-    "Compare AAPL against its market category peers",
-    "Which mid-cap stocks had unusual volume spikes last quarter?",
+"Which stocks have gained the most this month?",
+"Which are the top 5 ETFs based on their 3-year return?",
+"What is Apple's return over the last 3 months?",
+"Which stocks are currently showing unusual trading volume?",
+"Can you compare the price trends of AAPL and MSFT over the last year?",
+"Can you give me a complete overview of AAPL, including its price, volume, returns, and other key information?"
 ]
 
 
@@ -190,13 +190,6 @@ with st.sidebar:
         st.rerun()
 
     st.markdown("---")
-    st.caption(
-        "Data covers historical + incremental stock and ETF prices, "
-        "returns, volume anomalies, and drawdown — sourced from the "
-        "Gold layer (mart_screener, mart_unusual_volume, "
-        "mart_normalized_prices, and related views)."
-    )
-
 
 # -----------------------------------
 # Main header
