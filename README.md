@@ -281,3 +281,34 @@ LIMIT 20;
 - Bring in a real industry/sector reference dataset if one becomes available, to replace the listing-tier fallback
 - Broader monitoring/alerting on `ingestion_audit` FAILED rows
 - Revisit the correlation-based peer-grouping approach once more trading history has accumulated
+
+##TO DEPLOY THE CLOUD FUNCTIONS
+gcloud functions deploy bronze-to-silver `                                                        
+>>   --gen2 `                                                       
+>>   --runtime=python312 `                                         
+>>   --region=us-central1 `
+>>   --source=. `    
+>>   --entry-point=bronze_to_silver `                               
+>>   --trigger-event-filters="type=google.cloud.storage.object.v1.finalized" `                       
+>>   --trigger-event-filters="bucket=market-lens-506611-raw-mlteam-2026" `
+>>   --memory=512MB `
+>>   --timeout=540s `
+>>   --service-account=marketlens-cloud-function-sa@market-lens-506611.iam.gserviceaccount.com `
+>>   --project=market-lens-506611
+
+
+-lens-repo\transform\gold\procedures> gcloud functions deploy load-price-data
+ --gen2 
+--runtime=python312 
+--region=us-central1 
+--source=. 
+--entry-point=gcs_to_bronze 
+--trigger-event-filters="type=google.cloud.storage.object.v1.finalized" 
+--trigger-event-filters="bucket=market-lens-506611-raw-mlteam-2026"
+ --memory=512MB --timeout=540s 
+--service-account=marketlens-cloud-function-sa@marketlens-506611.iam.gserviceaccount.com --project=market-lens-506611
+
+
+
+
+ gcloud functions deploy silver-to-gold --gen2 --runtime=python312 --region=us-central1 --source=. --entry-point=silver_to_gold --trigger-event-filters="type=google.cloud.storage.object.v1.finalized" --trigger-event-filters="bucket=market-lens-506611-raw-mlteam-2026" --memory=512MB --timeout=540s --service-account=marketlens-cloud-function-sa@market-lens-506611.iam.gserviceaccount.com --project=market-lens-506611
