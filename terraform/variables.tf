@@ -13,27 +13,13 @@ variable "project_id" {
 variable "region" {
 
   # Explain what this variable is used for
-  description = "Default GCP region for MarketLens resources."
+  description = "Default GCP region for all MarketLens resources."
 
   # The region must be text
   type = string
 
-  # Use us-central1 if no other region is provided
+  # Use us-central1 as the default region
   default = "us-central1"
-}
-
-
-# Store the GCS bucket location
-variable "gcs_location" {
-
-  # Explain what this variable is used for
-  description = "Location of the MarketLens raw-data GCS bucket."
-
-  # The location must be text
-  type = string
-
-  # Use the US multi-region by default
-  default = "US"
 }
 
 
